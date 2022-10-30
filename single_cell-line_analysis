@@ -163,7 +163,7 @@ all.markers <- FindAllMarkers(intMock, assay = "RNA", slot = “data”, min.pct
 #Filter Top 300 Lowest adj_p_value for each cluster
 sortedMock <- head(all.markers, 300)
 IPSCclusters = unique(all.markers$cluster)
-for(i in IPSCcluster){
+for(i in IPSCclusters){
   indx <- match(i, all.markers$cluster)
   sortedMock <- rbind(sortedMock, all.markers[indx:(indx+299),])
   }
@@ -172,14 +172,14 @@ overlapComparison <- function(sortedMock, pathway, colnames) {
   num_sample_clusters = length(unique(sortedMock$seurat_clusters)
   num_pathway_clusters = length(colnames)
 
-  pDf <- data.frame(matrix(ncol = 8, nrow = num_clusters * num_pathway_clusters))
+  pDf <- data.frame(matrix(ncol = 8, nrow = num_sample_clusters * num_pathway_clusters))
   colnames(pDf) <- c("Sample", "Pathway" , "NumClusterMarkerGenes", "NumPathwayMarkerGenes", "Overlap", "BackgroundGeneCount", "OverlapP-value", "-log(p-value)")
-  pMat <- matrix(nrow=num_clusters, ncol= num_pathway_clusters)
+  pMat <- matrix(nrow=num_sample_clusters, ncol= num_pathway_clusters)
 
   count = 0
   ipscStart = 1
 
-  for(i in 0:num_clusters-1){ 
+  for(i in 0:num_sample_clusters-1){ 
     #Find where to split IPSC
     for(x in ipscStart:length(sortedMock$cluster)){
       if(sortedMock$cluster[x] != i){
