@@ -1,0 +1,307 @@
+SCTransform Integration Pipeline:
+#Import Libraries
+library(Seurat)
+library(ggplot2)
+library(sctransform)
+library(patchwork)
+library(cowplot)
+library(clustree)
+library("readxl")
+
+#Load Data Sets and Create Seurat Objects
+## 7_75_Mock
+Mock.data <- Read10X(data.dir = "C:/Users/Jonathan/Downloads/IPSC_data/7_75_Mock/raw_feature_bc_matrix")
+Mock <- CreateSeuratObject(counts = Mock.data,min.cells = 3, min.features = 1, project = "Mock") 
+Mock
+Mock[["percent.mt"]] <- PercentageFeatureSet(Mock, pattern = "^MT-")
+num_features <- sum(rowSums(Mock[['RNA']]@counts) != 0)
+
+## 7_75_COVID
+CoV.data <- Read10X(data.dir = "C:/Users/Jonathan/Downloads/IPSC_data/7_75_COVID/raw_feature_bc_matrix")
+CoV <- CreateSeuratObject(counts = CoV.data, min.cells =3, min.features = 1, project = "CoV")
+CoV
+CoV[["percent.mt"]] <- PercentageFeatureSet(CoV, pattern = "^MT-")
+
+#Quality Plots
+p1 <- VlnPlot(Mock, features = "nFeature_RNA") & geom_hline(aes(yintercept=500), colour="#990000")
+p2 <- VlnPlot(Mock, features = "percent.mt") & geom_hline(aes(yintercept=25), colour="#990000")
+p3 <- VlnPlot(CoV, features = "nFeature_RNA") & geom_hline(aes(yintercept=500), colour="#990000")
+p4 <- VlnPlot(CoV, features = "percent.mt") & geom_hline(aes(yintercept=25), colour="#990000")
+wrap_plots(p1, p2, p3, p4, ncol = 4)
+
+#Get Fraction Covid Gene Counts
+sum(GetAssayData(object = CoV, slot = "data")["hCov-19",]>0)/nrow(CoV@meta.data)
+<<
+38.97231%
+<<
+
+#Percent of hCov-19 in each cell
+CoV[["percent.cov"]] <- PercentageFeatureSet(CoV, features = “hCov-19")
+VlnPlot(CoV, features = “percent.cov”)
+
+#Remove hCov-19
+indexhCov19 = grep("hCov-19", rownames(CoV))
+indexKeep = 1:length(rownames(CoV))
+indexKeep = indexKeep[!indexKeep %in% indexhCov19]
+CoV = CoV[indexKeep,]
+
+#QC and SCTransform
+Mock<- subset(Mock, subset = nFeature_RNA > 500)
+Mock$stim <- "Mock"
+Mock <- SCTransform(Mock, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
+
+CoV<- subset(CoV, subset = nFeature_RNA > 500)
+CoV$stim <- "CoV"
+CoV<- SCTransform(CoV, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = FALSE)
+
+#Put Objects into a List
+ipsc.list <- list(Mock, CoV)
+
+#Prepare List for Integration
+features <- SelectIntegrationFeatures(object.list = ipsc.list, nfeatures = 3000)
+ipsc.list <- PrepSCTIntegration(object.list = ipsc.list, anchor.features = features)
+
+#Integrate
+ipsc.anchors <- FindIntegrationAnchors(object.list = ipsc.list, normalization.method = "SCT", anchor.features = features)
+ipsc.combined.sct <- IntegrateData(anchorset = ipsc.anchors, normalization.method = "SCT")
+
+#Perform Dimensionality Reduction
+ipsc.combined.sct <- RunPCA(ipsc.combined.sct, verbose = FALSE)
+ipsc.combined.sct <- RunUMAP(ipsc.combined.sct, reduction = "pca", dims = 1:30)
+
+#Get Range of Resolutions
+resolution.range <- seq(from = 0, to = 1, by = 0.25)
+# Find clusters using a range of resolutions
+ipsc.combined.sct <- Seurat::FindClusters(object = ipsc.combined.sct, resolution = resolution.range)
+
+#Mock Cluster Tree Diagram to Determine Optimal Clusters
+clustree(ipsc.combined.sct)
+
+#Find Neighbors and Cluster
+ipsc.combined.sct <- FindNeighbors(ipsc.combined.sct, reduction = "pca", dims = 1:20)
+ipsc.combined.sct <- FindClusters(ipsc.combined.sct, resolution = 0.5)
+
+#Feature Plot Overlaid and Combined                          
+p1 <- DimPlot(ipsc.combined.sct, reduction = "umap", group.by = "stim")
+p2 <- DimPlot(ipsc.combined.sct, reduction = "umap", label = TRUE)
+plot_grid(p1, p2)
+
+#Split Feature Plot
+DimPlot(ipsc.combined.sct, reduction = "umap", split.by = "stim")
+
+#Create Table of Cluster and Number of Cells
+pt <- table(Idents(ipsc.combined.sct), ipsc.combined.sct$orig.ident)
+pt <- as.data.frame(pt)
+pt$Var1 <- as.character(pt$Var1)
+
+#Percent of Condition
+for(i in unique(pt$Var2)){
+  sum = 0
+  for(j in 1:length(pt$Var1)){
+    if(pt$Var2[j]== i){
+      sum = sum + pt$Freq[j]
+    }
+  }
+  for(k in 1:length(pt$Var1)){
+    if(pt$Var2[k]==i){
+      pt$PercentTotal[k] = 100 * pt$Freq[k]/sum
+    }
+  }
+}
+
+#Number of Cells per Cluster
+ggplot(pt, aes(x = reorder(Var1, -Freq), y = Freq, fill = Var2)) + 
+theme_bw(base_size = 15) + 
+geom_col(width = 0.5) + 
+xlab("Cluster") + 
+ylab("Number of Cells") +
+scale_fill_discrete(name="Condition")
+pdf(“NumCellperCluster.pdf”)
+
+#Proportion of Cells per Cluster
+ggplot(pt, aes(x = reorder(Var1, -Freq), y = Freq, fill = Var2)) +  
+theme_bw(base_size = 15) + 
+geom_col(position = "fill", width = 0.5) + 
+xlab("Cluster") + 
+ylab("Proportion of Cells") +
+scale_fill_discrete(name="Condition")
+pdf(“ProportionCellperCluster.pdf”)
+
+#Percent of Cell Expression per Condition per Cluster
+ggplot(pt, aes(x= Var2, y= PercentTotal, fill = reorder(Var1, -Freq))) +  
+  theme_bw(base_size = 15) + 
+  xlab("Condition") + 
+  ylab("Percent per Cluster") + 
+  geom_bar(position="dodge", stat="identity")+ 
+  scale_fill_discrete(name="Cluster")
+
+#Percent of Cell Expression per Cluster per Condition
+ggplot(pt, aes(x= reorder(Var1, -Freq), y= PercentTotal, fill = Var2, Freq)) +  
+  theme_bw(base_size = 15) + 
+  xlab("Cluster") + 
+  ylab("Percent per Cluster") + 
+  scale_fill_discrete(name="Condition")+
+  geom_bar(position="dodge", stat="identity") 
+  
+#Split into Two
+intCoV <- subset(x = ipsc.combined.sct, subset = stim == "CoV")
+intMock <- subset(x = ipsc.combined.sct, subset = stim == "Mock")
+
+#Percent hCov-19 per Cluster
+VlnPlot(intCoV, features = "percent.cov")
+
+#Percent ACE2 and TMPRSS2
+VlnPlot(intCoV, features = "ACE2")
+VlnPlot(intCoV, features = "TMPRSS2")
+
+#Calculating Mock Expression Markers
+DefaultAssay(intMock) <- "RNA"
+intMock<- NormalizeData(intMock)
+all.markers <- FindAllMarkers(intMock, assay = "RNA", slot = “data”, min.pct = 0.25, thresh.use = 0.25)
+
+#Filter Top 300 Lowest adj_p_value for each cluster
+sortedMock <- head(all.markers, 300)
+IPSCclusters = unique(all.markers$cluster)
+for(i in IPSCcluster){
+  indx <- match(i, all.markers$cluster)
+  sortedMock <- rbind(sortedMock, all.markers[indx:(indx+299),])
+  }
+
+overlapComparison <- function(sortedMock, pathway, colnames) {
+  num_sample_clusters = length(unique(sortedMock$seurat_clusters)
+  num_pathway_clusters = length(colnames)
+
+  pDf <- data.frame(matrix(ncol = 8, nrow = num_clusters * num_pathway_clusters))
+  colnames(pDf) <- c("Sample", "Pathway" , "NumClusterMarkerGenes", "NumPathwayMarkerGenes", "Overlap", "BackgroundGeneCount", "OverlapP-value", "-log(p-value)")
+  pMat <- matrix(nrow=num_clusters, ncol= num_pathway_clusters)
+
+  count = 0
+  ipscStart = 1
+
+  for(i in 0:num_clusters-1){ 
+    #Find where to split IPSC
+    for(x in ipscStart:length(sortedMock$cluster)){
+      if(sortedMock$cluster[x] != i){
+        ipscNum = x - ipscStart
+        if(i == 0){
+          ipscNum = ipscNum + 1
+        }
+        break
+      }
+    }
+
+    #Reset MtrStart
+    pathwayStart = 1
+
+    #Iterate through Pathway Clusters
+    for(j in 0:num_pathway_clusters-1){
+      #Find where to split mtr
+      for(y in pathwayStart:length(pathway$Cluster)){
+        if(pathway$Cluster[y] != j){
+          pathwayNum = y - pathwayStart
+          if(j == 0){
+            pathwayNum = pathwayNum + 1
+          }
+          break
+        }
+      }
+
+      #Check Overlap
+      a = length(intersect(sortedMock$gene[ipscStart:x-1],pathway$Gene[pathwayStart:y-1]))
+      b = pathwayNum - a
+      c = ipscNum - a
+      d = num_features - b - c - a
+
+      #Create Contigency Table
+      dat <- data.frame(
+        "IPSC_DEG" = c(a, c),
+        "NotDEG" = c(b, d),
+        row.names = c("Pathway DE", "Pathway not DE")
+      )
+      colnames(dat) <- c("Sample DE", "Sample not DE")
+
+      #Perform Fisher's Exact Test
+      pTest <- fisher.test(dat)
+      pDf$Sample[count] = i
+      pDf$Pathway[count] = colnames[j+1]
+      pDf$NumClusterMarkerGenes[count] = c
+      pDf$NumPathwayMarkerGenes[count] = b
+      pDf$Overlap[count] = a
+      pDf$BackgroundGeneCount[count] = d
+      pDf$`OverlapP-value`[count] = pTest$p.value
+      pDf$`-log(p-value)`[count] = -1 * log10(pTest$p.value)
+      count = count + 1
+      pMat[i+1, j+1] = (pTest$p.value)
+
+      pathwayStart = y
+    }
+    ipscStart = x
+  }
+
+  #Create and Print P-val Matrix
+  pMat
+  pMatDf <- data.frame(pMat)
+  colnames(pMatDf) <- colnames
+
+  for(i in 0:num_sample_cluster-1){
+      if(i<=1){
+          xV = 1 + (num_pathway_clusters-1)*i
+      }
+      else{
+          xV = num_pathway_clusters*i
+      }
+      yV = (num_pathway_clusters-1) + num_pathway_clusters*i
+
+  tempDf <- pDf[xV:yV,]
+  newData <- head(tempDf[order(tempDf$`-log(p-value)`, decreasing = TRUE), ])
+  p <- ggplot(newData, aes(x=reorder(Pathway,`-log(p-value)`), y=`-log(p-value)`))
+  print(p + geom_bar(position = position_dodge() ,stat = "identity", aes(fill = Sample)) + 
+    facet_wrap(~Sample, nrow = 6) + 
+    coord_flip() + 
+    xlab("Mature Cluster Type") + 
+    guides(color=guide_legend(title="IPSC Cluster Num")))
+  }
+ }
+
+#Compare Against Patrick Ellinor Heart Failure Data Set
+HF <- read_excel("C:/Users/Jonathan/Downloads/mature.xlsx")
+HF = subset(PE, Marker>0)
+colnames <- c("Fibroblast I","Fibroblast II", "Atrial Cardiomyocyte", "Ventricular Cardiomyocyte I", "Ventricular Cardiomyocyte II", "Pericyte","Macrophage", "Endothelium I", "Endothelium II", "Adipocyte", "Vascular Smooth Muscle", "Fibroblast III", "Ventricular Cardiomyocyte III", "Neuronal", "Lymphocyte")
+
+overlapComparison(sortedMock, HF, colnames)
+
+#Compare Cells of the Human Heart Paper Data Set
+CH <- read_excel("C:/Users/Jonathan/Downloads/mature2.xlsx")
+CH = subset(CH, adj_p_val<0.05)
+
+colnames <- c("aCM1","aCM2", "aCM3", "aCM4", "aCM5", "vCM1", "vCM2", "vCM3", "vCM4", "vCM5", "vFB1", "vFB2", "vFB3", "vFB4", "vFB5", 
+               "vFB6", "aFB1", "aFB2", "aFB3", "aFB4", "aFB5", "aFB6", "NK", "CD16+Mo", "DOCK4+MΦ1", "CD4+T_cytox", "LYVE1+MΦ1",
+               "CD8+T_tem", "CD8+T_cytox", "LYVE1+MΦ2", "LYVE1+MΦ3", "Mo_classic", "Mo_pi", "DOCK4+MΦ2", "Mast", "NKT", "MΦ_mod",
+               "MΦ_AgP", "B-cells", "CD4+T_tem", "dpT", "doublets", "NΦ", "IL17RA+Mo", "NC1", "NC2", "NC3", "NC4", "NC5", "NC6",
+               "Adip1", "Adip2", "Adip3", "Adip4", "FBO", "Myo_slow1", "Myo_fast2", "satellite", "EC1", "Myeloid", "Lymphoid",
+               "SMC", "PC", "B-cells", "doublets", "Myo3", "EC2", "EC3", "Myo4", "SMC2", "Myo5", "Myo6", "FB", "SMC3", "EC-ven",
+               "Ec-art", "PC", "EC-cap", "Mesen", "EC4", "EC_ln", "PC_str", "FB_like")
+
+overlapComparison(sortedMock, CH, colnames)
+
+# Cluster 5 Selected as Fibroblast-like Cardiomyocyte + Cluster 7 Selected as Ventricular Cardiomyocyte
+covidMarkers <- function(selected_cluster, clusterMarkerData){
+  combinedCluster <- subset(ipsc.combined.sct, seurat_cluster == selected_cluster)
+  combinedCluster$nominatorStatus <- "null"
+  for(i in 1:length(combinedCluster5$stim)){
+    if(combinedCluster$percent.cov[i] > 1 & combinedCluster$percent.cov[i] < 62){
+      combinedCluster$nominatorStatus[i] <- "nominator"
+    }
+    else if(combinedCluster$percent.cov<=1 || combinedCluster5$percent.cov == "null"){
+      combinedCluster$nominatorStatus[i] <- "denominator"
+    }
+  }
+  clusterMarkerData <- FindMarkers(combinedCluster, ident.1 = "nominator", ident.2 = “denominator”, group.by = "nominatorStatus", min.pct = 0.25)
+  clusterMarkerData <- as.data.frame(row.names(clusterMarkerData))
+  print(df[1], row.names = FALSE)
+  }
+  
+  DefaultAssay(ipsc.combined.sct) <- "RNA"
+  covidMarkers(5, cluster5Marker)
+  covidMarkers(7, cluster7Marker)
+  # Run DE List Through Enrichr
