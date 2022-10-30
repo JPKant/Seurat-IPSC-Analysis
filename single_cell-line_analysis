@@ -6,6 +6,7 @@ library(sctransform)
 library(patchwork)
 library(cowplot)
 library(clustree)
+library(EnchancedVolcano)
 library("readxl")
 
 #Load Data Sets and Create Seurat Objects
@@ -304,4 +305,18 @@ covidMarkers <- function(selected_cluster, clusterMarkerData){
   DefaultAssay(ipsc.combined.sct) <- "RNA"
   covidMarkers(5, cluster5Marker)
   covidMarkers(7, cluster7Marker)
-  # Run DE List Through Enrichr
+  
+EnhancedVolcano(cluster5Marker , 
+                lab = cluster5Marker$gene,
+                title = 'Fibroblast-like Cluster 5',
+                x ="avg_log2FC", 
+                y ="p_val_adj")
+
+EnhancedVolcano(cluster5Marker , 
+                lab = cluster7Marker$gene,
+                x ="avg_log2FC",
+                title = 'Cardiomyocyte Cluster 7',
+                y ="p_val_adj")
+  
+  
+  
